@@ -1,0 +1,6 @@
+# A configured virtual endstop output must not be replaced by RT-OSCI.
+CONFIG tmc5262_scope.cfg
+DICTIONARY atmega2560.dict
+SHOULD_FAIL
+
+SET_TMC_FIELD STEPPER=stepper_x FIELD=do0_scope_en VALUE=1

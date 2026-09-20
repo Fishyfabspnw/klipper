@@ -491,8 +491,10 @@ class TMC5262CurrentHelper:
 ######################################################################
 
 class TMC5262CommandHelper(tmc.TMCCommandHelper):
-    def __init__(self, config, mcu_tmc, current_helper, init_callback):
+    def __init__(self, config, mcu_tmc, current_helper, init_callback,
+                 field_validator):
         self.init_callback = init_callback
+        self.field_validator = field_validator
         tmc.TMCCommandHelper.__init__(self, config, mcu_tmc, current_helper,
                                      _adc_to_celsius)
 
@@ -503,6 +505,13 @@ class TMC5262CommandHelper(tmc.TMCCommandHelper):
             self.mcu_phase_offset = None
         tmc.TMCCommandHelper._init_registers(self, print_time)
 
+    def cmd_SET_TMC_FIELD(self, gcmd):
+        field_name = gcmd.get('FIELD').lower()
+        value = gcmd.get_int('VALUE', None)
+        velocity = gcmd.get_float('VELOCITY', None, minval=0.)
+        self.field_validator(gcmd, field_name, value, velocity)
+        tmc.TMCCommandHelper.cmd_SET_TMC_FIELD(self, gcmd)
+
 
 class TMC5262:
     def __init__(self, config):
@@ -512,9 +521,12 @@ class TMC5262:
         self.mcu_tmc = tmc2130.MCU_TMC_SPI(config, Registers, self.fields,
                                            TMC_FREQUENCY)
         tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
+        self.do0_pin = config.get("do0_pin", None)
+        self.do1_pin = config.get("do1_pin", None)
         current_helper = TMC5262CurrentHelper(config, self.mcu_tmc)
         cmdhelper = TMC5262CommandHelper(
-            config, self.mcu_tmc, current_helper, self._handle_pll_init)
+            config, self.mcu_tmc, current_helper, self._handle_pll_init,
+            self._validate_runtime_field)
         cmdhelper.setup_register_dump(ReadRegisters)
         self.get_phase_offset = cmdhelper.get_phase_offset
         self.get_status = cmdhelper.get_status
@@ -558,10 +570,47 @@ class TMC5262:
         set_config_field(config, "tpowerdown", 10)
         set_config_field(config, "slope_control", 3)
 
+        set_config_field(config, "do0_scope_en", False)
+        set_config_field(config, "do1_scope_en", False)
+        for field in ("do0_scope_sel", "do1_scope_sel"):
+            value = config.getint("driver_" + field.upper(), 0,
+                                  minval=0, maxval=28)
+            self.fields.set_field(field, value)
+
+        # DO0/DO1 are physically shared between diagnostic output and the
+        # RT-OSCI DAC. Prevent a virtual endstop from being masked by scope
+        # routing on the same pin.
+        if self.do0_pin is not None and self.fields.get_field("do0_scope_en"):
+            raise config.error("tmc5262 %s: driver_DO0_SCOPE_EN conflicts "
+                               "with do0_pin" % (self.name,))
+        if self.do1_pin is not None and self.fields.get_field("do1_scope_en"):
+            raise config.error("tmc5262 %s: driver_DO1_SCOPE_EN conflicts "
+                               "with do1_pin" % (self.name,))
+
         # Write the chopper configuration last.
         for register in ("CHOPCONF",):
             value = self.fields.registers.pop(register)
             self.fields.registers[register] = value
+
+    def _validate_runtime_field(self, gcmd, field_name, value, velocity):
+        limited_fields = {
+            "do0_scope_en": 1,
+            "do1_scope_en": 1,
+            "do0_scope_sel": 0x1c,
+            "do1_scope_sel": 0x1c,
+        }
+        if field_name not in limited_fields:
+            return
+        if velocity is not None:
+            raise gcmd.error("FIELD=%s requires VALUE" % (field_name,))
+        if value is None or value < 0 or value > limited_fields[field_name]:
+            raise gcmd.error("Invalid value for FIELD=%s" % (field_name,))
+        if (field_name == "do0_scope_en" and value
+                and self.do0_pin is not None):
+            raise gcmd.error("do0_scope_en conflicts with do0_pin")
+        if (field_name == "do1_scope_en" and value
+                and self.do1_pin is not None):
+            raise gcmd.error("do1_scope_en conflicts with do1_pin")
 
     def _handle_pll_init(self):
         # Check on every initialization, including re-enable after power loss.
