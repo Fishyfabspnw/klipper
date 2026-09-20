@@ -511,6 +511,7 @@ class TMC5262:
         self.fields = tmc.FieldHelper(Fields, SignedFields, FieldFormatters)
         self.mcu_tmc = tmc2130.MCU_TMC_SPI(config, Registers, self.fields,
                                            TMC_FREQUENCY)
+        tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
         current_helper = TMC5262CurrentHelper(config, self.mcu_tmc)
         cmdhelper = TMC5262CommandHelper(
             config, self.mcu_tmc, current_helper, self._handle_pll_init)
@@ -522,9 +523,8 @@ class TMC5262:
         self.fields.set_config_field(config, "offset_sin90", 0)
         self.fields.set_field("en_pwm_mode", 0)
         self.fields.set_field("tpwmthrs", 0)
-        self.fields.set_field("tcoolthrs", 0)
-        self.fields.set_field("thigh", 0)
-        self.fields.registers["DO_CONF"] = 0
+        tmc.TMCVcoolthrsHelper(config, self.mcu_tmc)
+        tmc.TMCVhighHelper(config, self.mcu_tmc)
         self.fields.registers["DO_SCOPE_CONF"] = 0
 
         set_config_field = self.fields.set_config_field
@@ -544,7 +544,13 @@ class TMC5262:
         set_config_field(config, "tbl", 2)
         set_config_field(config, "tpfd", 4)
 
-        self.fields.registers["COOLCONF"] = 0
+        set_config_field(config, "semin", 0)
+        set_config_field(config, "seup", 0)
+        set_config_field(config, "semax", 0)
+        set_config_field(config, "sedn", 0)
+        set_config_field(config, "seimin", 0)
+        set_config_field(config, "sgt", 0)
+        set_config_field(config, "sfilt", 0)
 
         set_config_field(config, "iholddelay", 7)
         set_config_field(config, "irundelay", 4)
