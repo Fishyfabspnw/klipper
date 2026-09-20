@@ -87,7 +87,7 @@ class FieldHelper:
 ######################################################################
 
 class TMCErrorCheck:
-    def __init__(self, config, mcu_tmc):
+    def __init__(self, config, mcu_tmc, temp_from_adc=None):
         self.printer = config.get_printer()
         name_parts = config.get_name().split()
         self.stepper_name = ' '.join(name_parts[1:])
@@ -126,7 +126,7 @@ class TMCErrorCheck:
         # Setup for temperature query
         self.adc_temp = None
         self.adc_temp_reg = self.fields.lookup_register("adc_temp")
-        self.temp_from_adc = getattr(mcu_tmc, "temp_from_adc", None)
+        self.temp_from_adc = temp_from_adc
         if self.adc_temp_reg is not None:
             pheaters = self.printer.load_object(config, 'heaters')
             pheaters.register_monitor(config)
@@ -214,10 +214,8 @@ class TMCErrorCheck:
             return {'drv_status': None, 'temperature': None}
         temp = None
         if self.adc_temp is not None:
-            if self.temp_from_adc is not None:
-                temp = round(self.temp_from_adc(self.adc_temp), 2)
-            else:
-                temp = round((self.adc_temp - 2038) / 7.7, 2)
+            adc = self.fields.get_field("adc_temp", self.adc_temp)
+            temp = round(self.temp_from_adc(adc), 2)
         last_value, reg_name = self.drv_status_reg_info[:2]
         if last_value != self.last_drv_status:
             self.last_drv_status = last_value
@@ -236,8 +234,6 @@ class TMCStallguardDump:
         self.mcu_tmc = mcu_tmc
         self.mcu = self.mcu_tmc.get_mcu()
         self.fields = self.mcu_tmc.get_fields()
-        self.sg_result_from_drv_status = getattr(
-            mcu_tmc, "sg_result_from_drv_status", None)
         self.sg2_supp = False
         self.sg4_reg_name = None
         # It is possible to support TMC2660, just disable it for now
@@ -290,8 +286,6 @@ class TMCStallguardDump:
                 cs_actual = self.fields.get_field("cs_actual", reg_val)
                 sg_result = self.fields.get_field("sg_result", reg_val)
                 is_stealth = self.fields.get_field("stealth", reg_val)
-                if self.sg_result_from_drv_status is not None:
-                    sg_result = self.sg_result_from_drv_status(reg_val)
                 recv_time = status["#receive_time"]
                 if is_stealth and self.sg4_reg_name == "SG4_RESULT":
                     sg4_ret = self.mcu_tmc.get_register_raw("SG4_RESULT")
@@ -325,7 +319,7 @@ class TMCStallguardDump:
 ######################################################################
 
 class TMCCommandHelper:
-    def __init__(self, config, mcu_tmc, current_helper):
+    def __init__(self, config, mcu_tmc, current_helper, temp_from_adc=None):
         self.printer = config.get_printer()
         self.stepper_name = ' '.join(config.get_name().split()[1:])
         self.name = config.get_name().split()[-1]
@@ -342,7 +336,7 @@ class TMCCommandHelper:
         # DUMP_TMC support
         self.read_registers = self.read_translate = None
         # Common tmc helpers
-        self.echeck_helper = TMCErrorCheck(config, mcu_tmc)
+        self.echeck_helper = TMCErrorCheck(config, mcu_tmc, temp_from_adc)
         self.record_helper = TMCStallguardDump(config, mcu_tmc)
         TMCMicrostepHelper(config, mcu_tmc)
         # Register callbacks

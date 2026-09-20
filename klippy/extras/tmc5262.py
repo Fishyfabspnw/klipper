@@ -4,72 +4,10 @@
 # Copyright (C) 2026  Uriah Kessman <fishyfabspnw@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math
+import math
 from . import tmc, tmc2130
 
 TMC_FREQUENCY = 16000000.
-
-# Preserve silicon defaults when a user overrides one field in an optional
-# TMC5262-specific register.
-OPTIONAL_REGISTER_DEFAULTS = {
-    "DO_SCOPE_CONF": 0x00,
-    "TSGP_LOW_VEL_THRS": 0x1000,
-    "COOLSTEPPLUS_CONF": 0x12,
-    "COOLSTEPPLUS_PI_REG": (16 << 16) | 128,
-    "COOLSTEPPLUS_PI_DOWN": (64 << 16) | 128,
-    "COOLSTEPPLUS_RESERVE_CONF": (100 << 24) | (220 << 16) | (50 << 8) | 150,
-    "SGP_CONF": 1 << 14,
-}
-
-# A complete filtered RCOIL update can take up to 100ms. Allow additional
-# time for queued enable and register writes before a homing move.
-RCOIL_PREFLIGHT_DWELL = .250
-RCOIL_ENABLE_CALLBACK_DWELL = .010
-
-# Keep TMC5262-specific initialization deterministic. In particular, configure
-# the motor model before enabling StealthChop+ and write CHOPCONF.TOFF last.
-TMC5262_REGISTER_INIT_ORDER = (
-    "DRV_CONF", "IHOLD_IRUN", "TPOWERDOWN", "COIL_INDUCT",
-    "R_COIL_USER", "T_RCOIL_MEAS", "CURRENT_PI_REG", "ANGLE_PI_REG",
-    "CUR_ANGLE_LIMIT", "ANGLE_LOWER_LIMIT", "PWMCONF", "TPWMTHRS",
-    "TCOOLTHRS", "THIGH", "TSGP_LOW_VEL_THRS", "DO_CONF",
-    "DO_SCOPE_CONF", "GCONF", "CHOPCONF",
-)
-
-
-OPTIONAL_FIELD_LIMITS = {
-    "do0_scope_sel": 0x1c,
-    "do1_scope_sel": 0x1c,
-    "cool_cur_div": 10,
-}
-
-
-def configure_optional_field(config, fields, field_name):
-    option = "driver_" + field_name.upper()
-    if config.get(option, None) is None:
-        return
-    register = fields.lookup_register(field_name)
-    if (register not in fields.registers
-            and register in OPTIONAL_REGISTER_DEFAULTS):
-        fields.registers[register] = OPTIONAL_REGISTER_DEFAULTS[register]
-    maxval = OPTIONAL_FIELD_LIMITS.get(field_name)
-    if maxval is not None:
-        value = config.getint(option, minval=0, maxval=maxval)
-        fields.set_field(field_name, value)
-    else:
-        fields.set_config_field(config, field_name, 0)
-
-
-def pwm_measurement_defaults(pwm_freq):
-    # TMC5262 datasheet table 8.
-    if not 0 <= pwm_freq <= 8:
-        raise ValueError("driver_PWM_FREQ must be in range 0..8")
-    if pwm_freq <= 2:
-        return 14, 15
-    if pwm_freq <= 5:
-        return 13, 14
-    return 12, 13
-
 
 def _adc_to_celsius(adc_value):
     return 1.042 * adc_value - 264.6
@@ -185,7 +123,7 @@ Fields["GSTAT"] = {
 Fields["DO_CONF"] = {
     "do0_error": 0x01 << 0,
     "do0_otpw": 0x01 << 1,
-    "diag0_stall": 0x01 << 2,
+    "do0_stall": 0x01 << 2,
     "do0_index": 0x01 << 3,
     "do0_step": 0x01 << 4,
     "do0_dir": 0x01 << 5,
@@ -198,7 +136,7 @@ Fields["DO_CONF"] = {
     "do0_ev_n_deviation": 0x01 << 12,
     "do1_error": 0x01 << 13,
     "do1_otpw": 0x01 << 14,
-    "diag1_stall": 0x01 << 15,
+    "do1_stall": 0x01 << 15,
     "do1_index": 0x01 << 16,
     "do1_step": 0x01 << 17,
     "do1_dir": 0x01 << 18,
@@ -553,11 +491,10 @@ class TMC5262CurrentHelper:
 ######################################################################
 
 class TMC5262CommandHelper(tmc.TMCCommandHelper):
-    def __init__(self, config, mcu_tmc, current_helper, init_callback,
-                 field_validator):
+    def __init__(self, config, mcu_tmc, current_helper, init_callback):
         self.init_callback = init_callback
-        self.field_validator = field_validator
-        tmc.TMCCommandHelper.__init__(self, config, mcu_tmc, current_helper)
+        tmc.TMCCommandHelper.__init__(self, config, mcu_tmc, current_helper,
+                                     _adc_to_celsius)
 
     def _init_registers(self, print_time=None):
         if self.init_callback():
@@ -565,13 +502,6 @@ class TMC5262CommandHelper(tmc.TMCCommandHelper):
             # Do not retain a phase offset measured before that reset.
             self.mcu_phase_offset = None
         tmc.TMCCommandHelper._init_registers(self, print_time)
-
-    def cmd_SET_TMC_FIELD(self, gcmd):
-        field_name = gcmd.get('FIELD').lower()
-        value = gcmd.get_int('VALUE', None)
-        velocity = gcmd.get_float('VELOCITY', None, minval=0.)
-        self.field_validator(gcmd, field_name, value, velocity)
-        tmc.TMCCommandHelper.cmd_SET_TMC_FIELD(self, gcmd)
 
 
 class TMC5262:
@@ -581,45 +511,21 @@ class TMC5262:
         self.fields = tmc.FieldHelper(Fields, SignedFields, FieldFormatters)
         self.mcu_tmc = tmc2130.MCU_TMC_SPI(config, Registers, self.fields,
                                            TMC_FREQUENCY)
-        self.mcu_tmc.temp_from_adc = self._temp_from_adc_register
-        self.mcu_tmc.sg_result_from_drv_status = self._sg_result_from_drv_status
-        # PLL initialization must run before TMCCommandHelper's connect handler.
-        self.printer.register_event_handler("klippy:connect",
-                                            self._handle_pll_init)
-
-        # The TMC5262 routes stall output through DO_CONF instead of GCONF.
-        # The field aliases above let Klipper's common virtual pin helper
-        # handle the hardware DO0/DO1 stall bits as diag0/diag1 signals.
-        self.fields.set_field("do0_invpp", 1)
-        self.fields.set_field("do1_invpp", 1)
-        diag0_pin = config.get("diag0_pin", None)
-        diag1_pin = config.get("diag1_pin", None)
-        if diag0_pin is not None and diag1_pin is not None:
-            raise config.error("tmc5262 %s: specify only one diag pin"
-                               % (self.name,))
-        tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
-
         current_helper = TMC5262CurrentHelper(config, self.mcu_tmc)
-        self.diag0_pin = diag0_pin
-        self.diag1_pin = diag1_pin
         cmdhelper = TMC5262CommandHelper(
-            config, self.mcu_tmc, current_helper, self._handle_pll_init,
-            self._validate_runtime_field)
+            config, self.mcu_tmc, current_helper, self._handle_pll_init)
         cmdhelper.setup_register_dump(ReadRegisters)
         self.get_phase_offset = cmdhelper.get_phase_offset
         self.get_status = cmdhelper.get_status
 
         tmc.TMCWaveTableHelper(config, self.mcu_tmc)
         self.fields.set_config_field(config, "offset_sin90", 0)
-        self.stealthchop_velocity = config.getfloat(
-            "stealthchop_threshold", None, minval=0.)
-        self.stealthchop_plus_configured = (
-            self.stealthchop_velocity is not None
-            and self.stealthchop_velocity > 0.)
-        tmc.TMCStealthchopHelper(config, self.mcu_tmc)
-        # Reuse Klipper's established CoolStep / StallGuard velocity helpers.
-        tmc.TMCVcoolthrsHelper(config, self.mcu_tmc)
-        tmc.TMCVhighHelper(config, self.mcu_tmc)
+        self.fields.set_field("en_pwm_mode", 0)
+        self.fields.set_field("tpwmthrs", 0)
+        self.fields.set_field("tcoolthrs", 0)
+        self.fields.set_field("thigh", 0)
+        self.fields.registers["DO_CONF"] = 0
+        self.fields.registers["DO_SCOPE_CONF"] = 0
 
         set_config_field = self.fields.set_config_field
         self.fields.set_field("clock_divider", 15)
@@ -638,252 +544,55 @@ class TMC5262:
         set_config_field(config, "tbl", 2)
         set_config_field(config, "tpfd", 4)
 
-        set_config_field(config, "semin", 0)
-        set_config_field(config, "seup", 0)
-        set_config_field(config, "semax", 0)
-        set_config_field(config, "sedn", 0)
-        set_config_field(config, "seimin", 0)
-        set_config_field(config, "sgt", 0)
-        set_config_field(config, "sfilt", 0)
+        self.fields.registers["COOLCONF"] = 0
 
         set_config_field(config, "iholddelay", 7)
         set_config_field(config, "irundelay", 4)
 
-        set_config_field(config, "pwm_freq", 0)
-        set_config_field(config, "freewheel", 0)
-        try:
-            sd_lo, sd_hi = pwm_measurement_defaults(
-                self.fields.get_field("pwm_freq"))
-        except ValueError as e:
-            raise config.error(str(e))
-        set_config_field(config, "sd_on_meas_lo", sd_lo)
-        set_config_field(config, "sd_on_meas_hi", sd_hi)
-
         set_config_field(config, "tpowerdown", 10)
         set_config_field(config, "slope_control", 3)
 
-        # TMC5262 StealthChop+ PI regulators.
-        set_config_field(config, "cur_p", 64)
-        set_config_field(config, "cur_i", 10)
-        set_config_field(config, "angle_p", 50)
-        set_config_field(config, "angle_i", 20)
-        set_config_field(config, "cur_pi_limit", 0xfff)
-        set_config_field(config, "angle_pi_limit", 256)
-        set_config_field(config, "angle_lower_i_limit", 256)
-
-        # TMC5262 motor model used by StealthChop+ and StallGuard+.
-        set_config_field(config, "t_rcoil_meas", 4096)
-        set_config_field(config, "coil_induct", 0)
-        set_config_field(config, "rcoil_manual", False)
-        set_config_field(config, "rcoil_thermal_coupling",
-                         self.stealthchop_plus_configured)
-        set_config_field(config, "r_coil_user_a", 0)
-        set_config_field(config, "r_coil_user_b", 0)
-        if self.stealthchop_plus_configured:
-            if not self.fields.get_field("coil_induct"):
-                raise config.error("tmc5262 %s: StealthChop+ requires "
-                                   "driver_COIL_INDUCT in microhenries"
-                                   % (self.name,))
-            if self.fields.get_field("rcoil_manual"):
-                rcoil_a = self.fields.get_field("r_coil_user_a")
-                rcoil_b = self.fields.get_field("r_coil_user_b")
-                if not rcoil_a or not rcoil_b:
-                    raise config.error("tmc5262 %s: driver_RCOIL_MANUAL "
-                                       "requires nonzero R_COIL_USER_A/B"
-                                       % (self.name,))
-
-        # Always restore TMC5262-only registers to their silicon reset
-        # values before applying optional user overrides. This prevents a
-        # removed option from surviving a host-only FIRMWARE_RESTART.
-        for register, value in OPTIONAL_REGISTER_DEFAULTS.items():
-            self.fields.registers.setdefault(register, value)
-
-        # Optional RT-OCSI, StallGuard+, and CoolStep+ controls. These are
-        # TMC5262-specific extensions to Klipper's common threshold helpers.
-        for field_name in (
-            "do0_scope_en", "do0_scope_sel", "do1_scope_en",
-            "do1_scope_sel", "tsgp_low_vel_thrs", "sgp_thrs",
-            "sgp_filt_en", "sgp_low_vel_freeze", "sgp_clear_cur_pi",
-            "sgp_low_vel_slope", "sgp_low_vel_cnts", "cool_cur_div",
-            "load_filt_en", "coolstep_p", "coolstep_i",
-            "cool_pi_down_limit", "cool_pi_off_speed",
-            "cool_low_load_reserve", "cool_hi_load_reserve",
-            "cool_low_generatoric_reserve", "cool_hi_generatoric_reserve",
-        ):
-            configure_optional_field(config, self.fields, field_name)
-
-        # DO0/DO1 are physically shared between diagnostic output and the
-        # RT-OCSI DAC. Prevent a virtual endstop from being masked by scope
-        # routing on the same pin.
-        if diag0_pin is not None and self.fields.get_field("do0_scope_en"):
-            raise config.error("tmc5262 %s: driver_DO0_SCOPE_EN conflicts "
-                               "with diag0_pin" % (self.name,))
-        if diag1_pin is not None and self.fields.get_field("do1_scope_en"):
-            raise config.error("tmc5262 %s: driver_DO1_SCOPE_EN conflicts "
-                               "with diag1_pin" % (self.name,))
-
-        self._order_register_cache()
-        if self.stealthchop_plus_configured:
-            self.stepper_enable = self.printer.load_object(config,
-                                                           "stepper_enable")
-            self.printer.register_event_handler(
-                "homing:home_rails_begin", self._handle_home_rails_begin)
-
-    def _validate_runtime_field(self, gcmd, field_name, value, velocity):
-        limited_fields = {
-            "do0_scope_en": 1,
-            "do1_scope_en": 1,
-            "do0_scope_sel": 0x1c,
-            "do1_scope_sel": 0x1c,
-            "cool_cur_div": 10,
-        }
-        if field_name not in limited_fields:
-            return
-        if velocity is not None:
-            raise gcmd.error("FIELD=%s requires VALUE" % (field_name,))
-        if value is None or value < 0 or value > limited_fields[field_name]:
-            raise gcmd.error("Invalid value for FIELD=%s" % (field_name,))
-        if (field_name == "do0_scope_en" and value
-                and self.diag0_pin is not None):
-            raise gcmd.error("do0_scope_en conflicts with diag0_pin")
-        if (field_name == "do1_scope_en" and value
-                and self.diag1_pin is not None):
-            raise gcmd.error("do1_scope_en conflicts with diag1_pin")
-
-    def _temp_from_adc_register(self, reg_value):
-        adc_temp = self.fields.get_field(
-            "adc_temp", reg_value, reg_name="ADC_VSUPPLY_TEMP")
-        return _adc_to_celsius(adc_temp)
-
-    def _sg_result_from_drv_status(self, reg_value):
-        result = self.fields.get_field(
-            "sg_result", reg_value, reg_name="DRV_STATUS")
-        if self.fields.get_field(
-                "stealth", reg_value, reg_name="DRV_STATUS"):
-            # In StealthChop+ the same 10-bit DRV_STATUS field mirrors the
-            # signed StallGuard+ result; in SpreadCycle it is unsigned SG2.
-            if result & 0x200:
-                result -= 0x400
-        return result
-
-    def _order_register_cache(self):
-        registers = self.fields.registers
-        for register in TMC5262_REGISTER_INIT_ORDER:
-            if register in registers:
-                value = registers.pop(register)
-                registers[register] = value
-
-    def _home_uses_this_stepper(self, rails):
-        return any(stepper.get_name() == self.name
-                   for rail in rails for stepper in rail.get_steppers())
-
-    def _abort_rcoil_preflight(self, message):
-        try:
-            self.stepper_enable.motor_off()
-        except self.printer.command_error:
-            logging.exception("TMC5262 %s could not disable motors after "
-                              "RCOIL failure", self.name)
-        raise self.printer.command_error(
-            "TMC5262 %s StealthChop+ RCOIL preflight failed: %s. "
-            "No homing move was started." % (self.name, message))
-
-    def _handle_home_rails_begin(self, homing_state, rails):
-        del homing_state
-        if not self._home_uses_this_stepper(rails):
-            return
-        if self.fields.get_field("rcoil_manual"):
-            return
-        try:
-            enable_line = self.stepper_enable.lookup_enable(self.name)
-            did_enable = False
-            if not enable_line.is_motor_enabled():
-                self.stepper_enable.set_motors_enable([self.name], True)
-                did_enable = True
-            toolhead = self.printer.lookup_object("toolhead")
-            if did_enable:
-                reactor = self.printer.get_reactor()
-                eventtime = reactor.monotonic()
-                reactor.pause(eventtime + RCOIL_ENABLE_CALLBACK_DWELL)
-            toolhead.dwell(RCOIL_PREFLIGHT_DWELL)
-            toolhead.wait_moves()
-            drv_status = self.mcu_tmc.get_register("DRV_STATUS")
-            cs_actual = self.fields.get_field("cs_actual", drv_status,
-                                              reg_name="DRV_STATUS")
-            rcoil = self.mcu_tmc.get_register("R_COIL")
-            rcoil_a = self.fields.get_field("r_coil_auto_a", rcoil,
-                                            reg_name="R_COIL")
-            rcoil_b = self.fields.get_field("r_coil_auto_b", rcoil,
-                                            reg_name="R_COIL")
-        except self.printer.command_error as e:
-            self._abort_rcoil_preflight(str(e))
-
-        hard_faults = [
-            field for field in ("s2vsa", "s2vsb", "s2ga", "s2gb", "ot")
-            if self.fields.get_field(field, drv_status,
-                                     reg_name="DRV_STATUS")
-        ]
-        if hard_faults:
-            self._abort_rcoil_preflight(
-                "driver reported %s" % (", ".join(hard_faults),))
-        if cs_actual < 50:
-            self._abort_rcoil_preflight(
-                "CS_ACTUAL=%d is below the required 50" % (cs_actual,))
-        if not rcoil_a or not rcoil_b:
-            self._abort_rcoil_preflight(
-                "R_COIL_AUTO_A/B did not both become nonzero (A=%d, B=%d)"
-                % (rcoil_a, rcoil_b))
-        logging.info("TMC5262 %s StealthChop+ RCOIL ready: A=%d B=%d "
-                     "CS_ACTUAL=%d", self.name, rcoil_a, rcoil_b, cs_actual)
-
-    def _build_pll_value(self, commit, clear_flags=False):
-        val = ((1 if commit else 0) << 0 | (1 << 2) | (1 << 3)
-               | (15 << 5))
-        if clear_flags:
-            val |= (1 << 13) | (1 << 14)
-        return val
-
-    def _pll_is_ready(self, pll):
-        control_mask = ((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3)
-                        | (0x1f << 5))
-        fault_mask = (1 << 12) | (1 << 13) | (1 << 14)
-        expected = self._build_pll_value(False)
-        return ((pll & control_mask) == expected and not (pll & fault_mask))
+        # Write the chopper configuration last.
+        for register in ("CHOPCONF",):
+            value = self.fields.registers.pop(register)
+            self.fields.registers[register] = value
 
     def _handle_pll_init(self):
-        try:
+        # Check on every initialization, including re-enable after power loss.
+        fields = tmc.FieldHelper({"PLL": Fields["PLL"]})
+        desired = {"commit": 0, "ext_not_int": 0, "clk_sys_sel": 1,
+                   "clk_fsm_ena": 1, "clock_divider": 15,
+                   "clk_1m0_tmo": 0, "clk_loss": 0, "clk_is_stuck": 0}
+        pll = self.mcu_tmc.get_register("PLL")
+        if all(fields.get_field(f, pll) == v for f, v in desired.items()):
+            return False
+        for field, value in desired.items():
+            fields.set_field(field, value)
+        # Disable the FSM before retrying configuration (datasheet p.106).
+        self.mcu_tmc.set_register("PLL", fields.set_field("clk_fsm_ena", 0))
+        fields.set_field("clk_fsm_ena", 1)
+        self.mcu_tmc.set_register("PLL", fields.set_field("commit", 1))
+        reactor = self.printer.get_reactor()
+        deadline = reactor.monotonic() + .500
+        while True:
             pll = self.mcu_tmc.get_register("PLL")
-            if self._pll_is_ready(pll):
-                return False
-            fault_mask = (1 << 12) | (1 << 13) | (1 << 14)
-            if pll & fault_mask:
-                # Datasheet PLL recovery: disable the FSM before restarting
-                # the normal 0x01ED -> 0x61EC initialization sequence.
-                self.mcu_tmc.set_register(
-                    "PLL", self._build_pll_value(False) & ~(1 << 3))
-            self.mcu_tmc.set_register("PLL", self._build_pll_value(True))
-            reactor = self.printer.get_reactor()
-            deadline = reactor.monotonic() + .020
-            while reactor.monotonic() < deadline:
-                reactor.pause(reactor.monotonic() + .001)
-                pll = self.mcu_tmc.get_register("PLL")
-                if not (pll & 0x01):
-                    break
-            else:
+            if not fields.get_field("commit", pll):
+                break
+            if reactor.monotonic() >= deadline:
                 raise self.printer.command_error(
                     "TMC5262 %s PLL commit timed out" % (self.name,))
-            self.mcu_tmc.set_register("PLL",
-                                      self._build_pll_value(False, True))
-            pll = self.mcu_tmc.get_register("PLL")
-            fault_mask = (1 << 12) | (1 << 13) | (1 << 14)
-            if pll & fault_mask:
-                raise self.printer.command_error(
-                    "TMC5262 %s PLL fault after initialization: %s"
-                    % (self.name, self.fields.pretty_format("PLL", pll)))
-            self.mcu_tmc.set_register("GSTAT", 0x3f)
-            return True
-        except self.printer.command_error as e:
-            logging.error("TMC5262 %s PLL init failed: %s", self.name, str(e))
-            raise
+            reactor.pause(reactor.monotonic() + .001)
+        fields.set_field("commit", 0)
+        fields.set_field("clk_loss", 1)
+        val = fields.set_field("clk_is_stuck", 1)
+        self.mcu_tmc.set_register("PLL", val)
+        pll = self.mcu_tmc.get_register("PLL")
+        if any(fields.get_field(f, pll)
+               for f in ("clk_1m0_tmo", "clk_loss", "clk_is_stuck")):
+            raise self.printer.command_error(
+                "TMC5262 %s PLL fault after initialization: %s"
+                % (self.name, fields.pretty_format("PLL", pll)))
+        return True
 
 
 def load_config_prefix(config):
