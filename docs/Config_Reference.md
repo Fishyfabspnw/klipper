@@ -4412,6 +4412,9 @@ cs_pin:
 #   Enable interpolation to 256 microsteps. The default is True.
 run_current:
 #   Motor current in amps RMS. This parameter must be provided.
+#   Klipper selects the smallest hardware current range that fits this
+#   value. SET_TMC_CURRENT is limited to that range; configure a higher
+#   run_current and restart to select a larger range if needed.
 #hold_current:
 #   Current in amps RMS when the motor is not moving. The default is
 #   run_current. Setting a separate hold_current is not recommended;
@@ -4421,12 +4424,6 @@ run_current:
 #   Obtain this value from the driver board documentation or schematic.
 #   The default is 12000. The driver uses integrated current sensing,
 #   not an external sense resistor.
-#current_range:
-#current_range_scale:
-#   Select the current range (0-3) and range scale (0-3). The default
-#   selects the smallest range that accommodates run_current. A scale
-#   below 3 is only valid with current_range=0. Select a larger range
-#   if SET_TMC_CURRENT will increase current beyond the initial value.
 #driver_MSLUT0: 2863314260
 #driver_MSLUT1: 1251300522
 #driver_MSLUT2: 608774441
