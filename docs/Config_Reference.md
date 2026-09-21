@@ -4481,6 +4481,14 @@ run_current:
 #driver_SEDN: 0
 #driver_SEIMIN: 0
 #   StallGuard2 and CoolStep register fields. See the TMC5262 datasheet.
+#driver_DO0_SCOPE_EN: False
+#driver_DO0_SCOPE_SEL: 0
+#driver_DO1_SCOPE_EN: False
+#driver_DO1_SCOPE_SEL: 0
+#   Route an RT-OSCI signal to DO0 or DO1. Select values 0-28 are
+#   defined by DO_SCOPE_CONF in the TMC5262 datasheet. Values 29-31
+#   are reserved. Do not enable RT-OSCI on an output configured as
+#   do0_pin or do1_pin for sensorless homing.
 ```
 
 
