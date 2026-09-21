@@ -427,19 +427,8 @@ class TMC5262CurrentHelper:
                                        above=0., maxval=max_current)
         self.req_hold_current = hold_current
         cr, crs = self._calc_ranges(run_current)
-        current_range = config.getint("current_range", cr, minval=0, maxval=3)
-        default_scale = crs if current_range == 0 else 3
-        current_range_scale = config.getint(
-            "current_range_scale", default_scale, minval=0, maxval=3)
-        if current_range != 0 and current_range_scale != 3:
-            raise config.error("tmc5262 %s: current_range_scale below 3 is "
-                               "only valid with current_range=0" % (self.name,))
-        self.fields.set_field("current_range", current_range)
-        self.fields.set_field("current_range_scale", current_range_scale)
-        if run_current > self._ifs_rms():
-            raise config.error("tmc5262 %s: run_current %.3f exceeds %.3fA "
-                               "RMS for the selected current range"
-                               % (self.name, run_current, self._ifs_rms()))
+        self.fields.set_field("current_range", cr)
+        self.fields.set_field("current_range_scale", crs)
         irun, ihold = self._calc_current(run_current, hold_current)
         self.fields.set_field("irun", irun)
         self.fields.set_field("ihold", ihold)
