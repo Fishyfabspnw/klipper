@@ -566,7 +566,17 @@ class TMCVirtualPinHelper:
         self.printer = config.get_printer()
         self.mcu_tmc = mcu_tmc
         self.fields = mcu_tmc.get_fields()
-        if self.fields.lookup_register('diag0_stall') is not None:
+        if self.fields.lookup_register('do0_stall') is not None:
+            do0_pin = config.get('do0_pin', None)
+            do1_pin = config.get('do1_pin', None)
+            if do0_pin is not None and do1_pin is not None:
+                raise config.error("Specify only one of do0_pin or do1_pin")
+            self.diag_pin = do0_pin if do0_pin is not None else do1_pin
+            self.diag_pin_field = ('do0_stall' if do0_pin is not None
+                                   else 'do1_stall')
+            self.fields.set_field('do0_invpp', 1)
+            self.fields.set_field('do1_invpp', 1)
+        elif self.fields.lookup_register('diag0_stall') is not None:
             if config.get('diag0_pin', None) is not None:
                 self.diag_pin = config.get('diag0_pin')
                 self.diag_pin_field = 'diag0_stall'

@@ -4392,7 +4392,8 @@ Configure a TMC5262 stepper motor driver via SPI. Define a section with a
 "tmc5262" prefix followed by the name of the corresponding stepper
 (for example, "[tmc5262 stepper_x]").
 
-This implementation supports SpreadCycle with a physical endstop.
+This implementation supports SpreadCycle with physical or sensorless
+endstops.
 
 ```
 [tmc5262 stepper_x]
@@ -4459,6 +4460,27 @@ run_current:
 #   Set the corresponding register field during driver configuration.
 #   See the TMC5262 datasheet for field definitions. The defaults are
 #   shown above.
+#coolstep_threshold:
+#   Velocity in mm/s above which CoolStep is enabled. The default is
+#   to disable CoolStep.
+#high_velocity_threshold:
+#   Velocity in mm/s above which CoolStep is disabled. The default is
+#   to leave this threshold disabled.
+#do0_pin:
+#do1_pin:
+#   Micro-controller pin connected to the driver's DO0 or DO1 output.
+#   Specify only one. The output is active low; normally prefix the
+#   pin with "^!". Use "tmc5262_stepper_x:virtual_endstop" as the
+#   stepper's endstop_pin and configure driver_SGT for sensorless homing.
+#   The default is to not enable sensorless homing.
+#driver_SGT: 0
+#driver_SFILT: 0
+#driver_SEMIN: 0
+#driver_SEUP: 0
+#driver_SEMAX: 0
+#driver_SEDN: 0
+#driver_SEIMIN: 0
+#   StallGuard2 and CoolStep register fields. See the TMC5262 datasheet.
 ```
 
 

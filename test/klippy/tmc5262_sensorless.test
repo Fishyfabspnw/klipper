@@ -1,0 +1,8 @@
+CONFIG tmc5262_sensorless.cfg
+DICTIONARY atmega2560.dict
+
+G28
+DUMP_TMC STEPPER=stepper_x REGISTER=DO_CONF
+SET_TMC_FIELD STEPPER=stepper_x FIELD=sgt VALUE=3
+M18
+G28
